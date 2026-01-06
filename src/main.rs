@@ -18,54 +18,18 @@ pub struct NormalizedTimeTag {
     pub time_tag_ps: u64,
 }
 
-pub struct TimeTagIter {
-    reader: ParquetRecordBatchReader,
+pub struct TimeTagBatchIterator {
     col_channel: Vec<u16>,
     col_time_tag: Vec<u64>,
     index: usize,
+    size: usize,
 }
 
-impl TimeTagIter {
-    fn next_columns(reader: &mut ParquetRecordBatchReader) -> Option<(Vec<u16>, Vec<u64>)> {
-        match reader.next() {
-            Some(batch_result) => {
-                let batch = batch_result.expect("Expected batch");
-                let col_channel_ref = batch.column_by_name("channel").expect("Expected channel ArrayRef");
-                let col_channel: &UInt16Array = col_channel_ref.as_any().downcast_ref().unwrap();
-                let col_channel_vec: Vec<u16> = col_channel.iter().map(|option| match option {
-                    Some(value) => value,
-                    None => panic!("None found in channel column field"),
-                }).collect();
-                let col_time_tag_ref = batch.column_by_name("time_tag").expect("Expected time_tag ArrayRef");
-                let col_time_tag: &UInt64Array = col_time_tag_ref.as_any().downcast_ref().unwrap();
-                let col_time_tag_vec: Vec<u64> = col_time_tag.iter().map(|option| match option {
-                    Some(value) => value,
-                    None => panic!("None found in channel column field"),
-                }).collect();
-                return Some((col_channel_vec, col_time_tag_vec));
-            }
-            None => {
-                return None;
-            }
-        }
-    }
-}
-
-impl Iterator for TimeTagIter {
+impl Iterator for TimeTagBatchIterator {
     type Item = NormalizedTimeTag;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.col_channel.len() {
-            match TimeTagIter::next_columns(&mut self.reader) {
-                Some((col_channel, col_time_tag)) => {
-                    self.col_channel = col_channel;
-                    self.col_time_tag = col_time_tag;
-                    self.index = 0;
-                },
-                None => {
-                    // end of index
-                    return None;
-                },
-            }
+        if self.index >= self.size {
+            return None;
         }
         let result = Some(NormalizedTimeTag {
             channel_id: self.col_channel[self.index],
@@ -76,28 +40,30 @@ impl Iterator for TimeTagIter {
     }
 }
 
-pub fn parquet_to_time_tag_iter(file: File) -> TimeTagIter {
+fn parquet_to_time_tag_iter(file: File) -> impl Iterator<Item = NormalizedTimeTag> {
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let mut reader: ParquetRecordBatchReader = builder.build().unwrap();
-    match TimeTagIter::next_columns(&mut reader) {
-        Some((col_channel, col_time_tag)) => {
-            return TimeTagIter {
-                reader: reader,
-                col_channel: col_channel,
-                col_time_tag: col_time_tag,
-                index: 0,
-            };
-        },
-        None => {
-            // this iterator will always return None
-            return TimeTagIter {
-                reader: reader,
-                col_channel: Vec::new(),
-                col_time_tag: Vec::new(),
-                index: 0,
-            };
-        },
-    }
+    return reader.flat_map(|batch_result| {
+        let batch = batch_result.expect("Expected batch");
+        let col_channel_ref = batch.column_by_name("channel").expect("Expected channel ArrayRef");
+        let col_channel: &UInt16Array = col_channel_ref.as_any().downcast_ref().unwrap();
+        let col_channel_vec: Vec<u16> = col_channel.iter().map(|option| match option {
+            Some(value) => value,
+            None => panic!("None found in channel column field"),
+        }).collect();
+        let col_time_tag_ref = batch.column_by_name("time_tag").expect("Expected time_tag ArrayRef");
+        let col_time_tag: &UInt64Array = col_time_tag_ref.as_any().downcast_ref().unwrap();
+        let col_time_tag_vec: Vec<u64> = col_time_tag.iter().map(|option| match option {
+            Some(value) => value,
+            None => panic!("None found in channel column field"),
+        }).collect();
+        return TimeTagBatchIterator {
+            col_channel: col_channel_vec,
+            col_time_tag: col_time_tag_vec,
+            index: 0,
+            size: batch.num_rows(),
+        }
+    })
 }
 
 fn main () {
@@ -115,29 +81,4 @@ fn main () {
         }
         println!("tag: {:?}", tag);
     }
-
-
-    //let file_reader = SerializedFileReader::new(file).unwrap();
-    
-    // let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-    // let mut reader: ParquetRecordBatchReader = builder.build().unwrap();
-    // let schema: &SchemaRef = &reader.schema();
-    // println!("schema: {:?}", schema);
-    // for batch_option in reader {
-    //     let batch = batch_option.expect("Expected batch");
-    //     let col_channel_ref = batch.column_by_name("channel").expect("Expected channel ArrayRef");
-    //     let col_channel: &UInt16Array = col_channel_ref.as_any().downcast_ref().unwrap();
-    //     let col_time_tag_ref = batch.column_by_name("time_tag").expect("Expected time_tag ArrayRef");
-    //     let col_time_tag: &UInt64Array = col_time_tag_ref.as_any().downcast_ref().unwrap();
-    //     for i in 0..batch.num_rows() {
-    //         let channel: u16 = col_channel.value(i);
-    //         let time_tag: u64 = col_time_tag.value(i);
-    //         let tag = NormalizedTimeTag {
-    //             channel_id: channel,
-    //             time_tag_ps: time_tag,
-    //         };
-    //         println!("tag: {:?}", tag);
-    //         break;
-    //     }
-    // }
 }
