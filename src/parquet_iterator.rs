@@ -69,7 +69,6 @@ pub fn log_parquet_stat(file: &File) {
 }
 
 pub fn parquet_to_time_tag_iter(file: File) -> impl Iterator<Item = NormalizedTimeTag> {
-    // parquet_stat(&file);
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let mut reader: ParquetRecordBatchReader = builder.build().unwrap();
     return reader.flat_map(|batch_result| {

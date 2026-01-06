@@ -64,14 +64,20 @@ fn log_peak (values: &Vec<f64>) {
     println!("peak at {} ps", peak_location);
 }
 
-async fn display_histogram (values: Vec<f64>, bin_size: usize) {
+async fn display_histogram (values: Vec<f64>) {
     log_peak(&values);
     let min_max = max_min_and_index(&values);
+
+    let len = values.len();
+    let bin_size = len/1000;
 
     let view_size = values.len()/bin_size;
     let mut coalesced: Vec<f64> = vec![0.0; view_size];
     for i in 0..values.len() {
         let idx = i / bin_size;
+        if idx >= view_size {
+            break;
+        }
         coalesced[idx] += values[i];
     }
     let view_min_max = max_min_and_index(&coalesced);
@@ -84,8 +90,10 @@ async fn display_histogram (values: Vec<f64>, bin_size: usize) {
         let width = screen_width() as usize;
         let height = screen_height() as usize;
         for i in 0..(view_size-1) {
-            let y0 = (height as f64) - (coalesced[i+0] - min)/(max - min) * (height as f64);
-            let y1 = (height as f64) - (coalesced[i+1] - min)/(max - min) * (height as f64);
+            let idx0 = (i+view_size+view_size/2)%view_size;
+            let idx1 = (i+1+view_size+view_size/2)%view_size;
+            let y0 = (height as f64) - (coalesced[idx0] - min)/(max - min) * (height as f64);
+            let y1 = (height as f64) - (coalesced[idx1] - min)/(max - min) * (height as f64);
             draw_line(i as f32, y0 as f32, (i+1) as f32, y1 as f32, 1.0, BLACK);
         }
         next_frame().await;
@@ -111,18 +119,6 @@ fn fft_convolve(buf1: Vec<f64>, buf2: Vec<f64>) -> Vec<f64> {
 
     fft.process(&mut complex_buf1);
     fft.process(&mut complex_buf2);
-
-    // normalize doesn't work
-    // // normalize
-    // for i in 0..bucket_size {
-    //     complex_buf0[i] = normalize_complex(complex_buf0[i]);
-    //     complex_buf1[i] = normalize_complex(complex_buf1[i]);
-    //     println!("{}", complex_buf0[i]);
-    //     // complex_buf1[i] = complex_buf1[i] / complex_buf1[i].norm();
-    // }
-
-    //let min_max = max_min_and_index(complex_buf0.iter().map(|complex| =>));
-    //let min_max = max_min_and_index(&values);
 
     // calculate dot between the two
     let mut complex_buf3 = vec![Complex{re: 0.0, im: 0.0}; len];
@@ -162,11 +158,37 @@ where
     }
 }
 
+// filtered tracker to track the pulse phase and interval
+#[derive(Debug)]
+struct ClockTracker {
+    interval: f64, // picoseconds
+    phase: f64,    // picoseconds
+    weight: f64,
+    initialized: bool,
+}
 
+impl ClockTracker {
+    fn update(&mut self, t: f64){
+        if !self.initialized {
+            self.phase = t;
+            self.initialized = true;
+        }else{
+            let intervals = (t-self.phase)/self.interval;
+            let rounded_intervals = intervals.round();
+            let derived_interval = (t-self.phase)/rounded_intervals;
+            let derived_phase = t - rounded_intervals * self.interval;
+
+            // perform gained adjustment
+            self.interval = (self.interval * 0.1 + derived_interval * 0.9);
+            self.phase = (self.phase * 0.1 + derived_phase * 0.9);
+        }
+    }
+}
+
+#[cfg(feature = "pulsed")]
 #[macroquad::main(window_conf)]
 async fn main () {
     let args: Vec<String> = env::args().collect();
-    // println!("args: {:?}", args);
     println!("reading: {:?}", args[1]);
 
     let file = File::open(args[1].clone()).unwrap();
@@ -176,18 +198,76 @@ async fn main () {
     let channel1_id = stat.channels[1];
     println!("Using channel {} and {}", channel0_id, channel1_id);
 
-    let bucket_size: usize = 10000;
+    let bucket_size: usize = 100_000;
 
     let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
     let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
 
-    // let mut kernel_range: Range<i64> = -160..160;
-    // let mut kernel_pdf_function = |x: f64| -> f64 {
-    //     if x < -15.0 || x > 15.0 {
-    //         return 0.0;
-    //     }
-    //     return 1.0/30.0;
-    // };
+    let mut kernel_pdf_function = |x: f64| -> f64 {
+        use std::f64::consts::PI;
+        let sigma = 20.0;
+        let coefficient = 1.0 / (sigma * (2.0 * PI).sqrt());
+        let exponent = -(x*x) / (2.0 * sigma*sigma);
+        return coefficient * exponent.exp();
+    };
+
+
+    let mut tracker = ClockTracker {
+        interval: 1000.0, // picoseconds
+        phase: 0.0,       // picoseconds
+        weight: 1.0,
+        initialized: false,
+    };
+    for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+        if tag.channel_id == channel1_id {
+            continue;
+        }
+        // only use channel 0 for sampling
+        tracker.update(tag.time_tag_ps as f64);
+    }
+    println!("tracker result: {:?}", tracker);
+
+
+    // let mut cnt: i32 = 0;
+    for tag in parquet_to_time_tag_iter(file) {
+        let sample_interval = tracker.interval * 1.0;
+        let r = (tag.time_tag_ps as f64 - tracker.phase).rem_euclid(sample_interval)/sample_interval;
+        let mut index = (r * bucket_size as f64).floor() as usize;
+        if index == bucket_size {
+            index = bucket_size - 1;
+        }
+        if tag.channel_id == channel0_id {
+            bucket0[index] += 1.0;
+        } else if tag.channel_id == channel1_id {
+            bucket1[index] += 1.0;
+        }
+    }
+    apply_pdf(&mut bucket0, kernel_pdf_function);
+    apply_pdf(&mut bucket1, kernel_pdf_function);
+
+    let result = fft_convolve(bucket0.clone(), bucket1.clone());
+
+    display_histogram(result).await;
+}
+
+#[cfg(feature = "uniform")]
+#[macroquad::main(window_conf)]
+async fn main () {
+    let args: Vec<String> = env::args().collect();
+    println!("reading: {:?}", args[1]);
+
+    let file = File::open(args[1].clone()).unwrap();
+    log_parquet_stat(&file);
+    let stat = parquet_stat(&file);
+    let channel0_id = stat.channels[0];
+    let channel1_id = stat.channels[1];
+    println!("Using channel {} and {}", channel0_id, channel1_id);
+
+    let bucket_size: usize = 100_000;
+
+    let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
+    let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
+
     let mut kernel_pdf_function = |x: f64| -> f64 {
         use std::f64::consts::PI;
         let sigma = 200.0;
@@ -196,12 +276,7 @@ async fn main () {
         return coefficient * exponent.exp();
     };
 
-    // let mut cnt: i32 = 0;
     for tag in parquet_to_time_tag_iter(file) {
-        // cnt += 1;
-        // if cnt < 1000 {
-        //     println!("tag: {:?}", tag);
-        // }
         let index = tag.time_tag_ps as usize % bucket_size;
         if tag.channel_id == channel0_id {
             bucket0[index] += 1.0;
@@ -214,7 +289,6 @@ async fn main () {
 
     let result = fft_convolve(bucket0.clone(), bucket1.clone());
 
-    display_histogram(result, 4).await;
-    // display_histogram(bucket0, 4).await;
+    display_histogram(result).await;
 
 }
