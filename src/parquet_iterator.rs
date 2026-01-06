@@ -54,8 +54,10 @@ pub fn parquet_stat(file: &File) ->  ParquetStat {
             break;
         }
     }
+    let mut channels = channel_ids.into_iter().collect::<Vec<u16>>();
+    channels.sort();
     return ParquetStat {
-        channels: channel_ids.into_iter().collect::<Vec<u16>>(),
+        channels: channels,
         schema: schema.clone(),
     };
 }

@@ -94,11 +94,74 @@ async fn display_histogram (values: Vec<f64>, bin_size: usize) {
 
 fn normalize_complex(c: Complex<f64>) -> Complex<f64> {
     let norm = c.norm();
-    if(norm < 0.01){
+    if norm < 0.01 {
         return Complex {re: 0.0, im: 0.0};
     }
     return c / norm;
 }
+
+fn fft_convolve(buf1: Vec<f64>, buf2: Vec<f64>) -> Vec<f64> {
+    let len = buf1.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(len);
+    let ifft = planner.plan_fft_inverse(len);
+
+    let mut complex_buf1: Vec<Complex<f64>> = buf1.iter().map(|value| Complex{re: value.clone(), im: 0.0}).collect();
+    let mut complex_buf2: Vec<Complex<f64>> = buf2.iter().map(|value| Complex{re: value.clone(), im: 0.0}).collect();
+
+    fft.process(&mut complex_buf1);
+    fft.process(&mut complex_buf2);
+
+    // normalize doesn't work
+    // // normalize
+    // for i in 0..bucket_size {
+    //     complex_buf0[i] = normalize_complex(complex_buf0[i]);
+    //     complex_buf1[i] = normalize_complex(complex_buf1[i]);
+    //     println!("{}", complex_buf0[i]);
+    //     // complex_buf1[i] = complex_buf1[i] / complex_buf1[i].norm();
+    // }
+
+    //let min_max = max_min_and_index(complex_buf0.iter().map(|complex| =>));
+    //let min_max = max_min_and_index(&values);
+
+    // calculate dot between the two
+    let mut complex_buf3 = vec![Complex{re: 0.0, im: 0.0}; len];
+    for i in 0..len {
+        complex_buf3[i] = (complex_buf1[i] * complex_buf2[i].conj()) / (len as f64);
+    }
+
+    // calculate ifft on complex_buf3 to get the convolution
+    ifft.process(&mut complex_buf3);
+
+    let mut reals: Vec<f64> = complex_buf3.iter().map(|complex| complex.re).collect();
+    // let mut imags: Vec<f64> = complex_buf2.iter().map(|complex| complex.im).collect();
+    return reals;
+}
+
+fn index_center_offset(idx: usize, len: usize) -> i64 {
+    let idx = idx as i64;
+    let len = len as i64;
+    // the second half will be negative
+    return (idx + len/2) % len - len/2;
+}
+
+fn apply_pdf<F>(buffer: &mut Vec<f64>, pdf: F)
+where
+    F: Fn(f64) -> f64,
+{
+    let len = buffer.len();
+    let mut pdf_buffer = vec![0.0; len];
+
+    for i in 0..len {
+        pdf_buffer[i] = pdf(index_center_offset(i, len) as f64);
+    }
+    // TODO: see if there is any copy with .to_vec()
+    let result = fft_convolve(buffer.to_vec(), pdf_buffer);
+    for i in 0..len {
+        buffer[i] = result[i];
+    }
+}
+
 
 #[macroquad::main(window_conf)]
 async fn main () {
@@ -118,15 +181,19 @@ async fn main () {
     let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
     let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
 
-    
-    let mut kernel_range: Range<i64> = -15..15;
     // let mut kernel_range: Range<i64> = -160..160;
-    let mut kernel_pdf_function = |_x: f64| {
-        // let mut x: f64 = x as f64;
-        // may want to try out normal distribution in the future but flat for now
-        let start = kernel_range.start as f64;
-        let end = kernel_range.end as f64;
-        return 1.0/(end - start);
+    // let mut kernel_pdf_function = |x: f64| -> f64 {
+    //     if x < -15.0 || x > 15.0 {
+    //         return 0.0;
+    //     }
+    //     return 1.0/30.0;
+    // };
+    let mut kernel_pdf_function = |x: f64| -> f64 {
+        use std::f64::consts::PI;
+        let sigma = 200.0;
+        let coefficient = 1.0 / (sigma * (2.0 * PI).sqrt());
+        let exponent = -(x*x) / (2.0 * sigma*sigma);
+        return coefficient * exponent.exp();
     };
 
     // let mut cnt: i32 = 0;
@@ -135,65 +202,19 @@ async fn main () {
         // if cnt < 1000 {
         //     println!("tag: {:?}", tag);
         // }
-        // let index = tag.time_tag_ps % bucket_size;
+        let index = tag.time_tag_ps as usize % bucket_size;
         if tag.channel_id == channel0_id {
-            for offset in kernel_range.clone() {
-                let index = ((bucket_size as i64 + tag.time_tag_ps as i64 + offset) as usize) % bucket_size;
-                bucket0[index] += kernel_pdf_function(offset as f64);
-            }
+            bucket0[index] += 1.0;
         } else if tag.channel_id == channel1_id {
-            for offset in kernel_range.clone() {
-                let index = ((bucket_size as i64 + tag.time_tag_ps as i64 + offset) as usize) % bucket_size;
-                bucket1[index] += kernel_pdf_function(offset as f64);
-            }
+            bucket1[index] += 1.0;
         }
     }
+    apply_pdf(&mut bucket0, kernel_pdf_function);
+    apply_pdf(&mut bucket1, kernel_pdf_function);
 
-    // println!("dasdfsadf");
-    // for i in 0..100 {
-    //     println!("{}", bucket0[i]);
-    // }
-    {
-        let mut planner = FftPlanner::<f64>::new();
-        let fft = planner.plan_fft_forward(bucket_size);
-        let ifft = planner.plan_fft_inverse(bucket_size);
+    let result = fft_convolve(bucket0.clone(), bucket1.clone());
 
-        let mut buff0: Vec<Complex<f64>> = bucket0.iter().map(|value| Complex{re: value.clone(), im: 0.0}).collect();
-        let mut buff1: Vec<Complex<f64>> = bucket1.iter().map(|value| Complex{re: value.clone(), im: 0.0}).collect();
-
-        fft.process(&mut buff0);
-        fft.process(&mut buff1);
-
-        // normalize doesn't work
-        // // normalize
-        // for i in 0..bucket_size {
-        //     buff0[i] = normalize_complex(buff0[i]);
-        //     buff1[i] = normalize_complex(buff1[i]);
-        //     println!("{}", buff0[i]);
-        //     // buff1[i] = buff1[i] / buff1[i].norm();
-        // }
-
-        //let min_max = max_min_and_index(buff0.iter().map(|complex| =>));
-        //let min_max = max_min_and_index(&values);
-
-        // calculate dot between the two
-        let mut buff2 = vec![Complex{re: 0.0, im: 0.0}; bucket_size];
-        for i in 0..bucket_size {
-            buff2[i] = (buff0[i] * buff1[i].conj()) / (bucket_size as f64);
-        }
-
-        // calculate ifft on buff2 to get the convolution
-        ifft.process(&mut buff2);
-
-        let mut reals: Vec<f64> = buff2.iter().map(|complex| complex.re).collect();
-        let mut imags: Vec<f64> = buff2.iter().map(|complex| complex.im).collect();
-
-        // display_histogram(imags, 4);
-        // display_histogram(bucket0, 4).await;
-        // display_histogram(bucket1, 4).await;
-        display_histogram(reals, 4).await;
-    }
-    //display_histogram(bucket0, 4);
-    // let histogram_bin_size = 4;// only when displaying, non-critical
+    display_histogram(result, 4).await;
+    // display_histogram(bucket0, 4).await;
 
 }
