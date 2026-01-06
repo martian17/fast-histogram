@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 parquet = { version = "57.1.0", features = ["arrow"] }
 arrow = "57.1.0"
+macroquad = "0.4"
+faer = "0.23.2"
+rustfft = "6.4.1"

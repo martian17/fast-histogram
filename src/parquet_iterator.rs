@@ -34,7 +34,40 @@ impl Iterator for TimeTagBatchIterator {
     }
 }
 
+pub struct ParquetStat {
+    pub channels: Vec<u16>,
+    pub schema: SchemaRef,
+}
+
+pub fn parquet_stat(file: &File) ->  ParquetStat {
+    use std::collections::HashSet;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap()).unwrap();
+    let schema = builder.schema();
+
+    let mut channel_ids = HashSet::<u16>::new();
+    let mut cnt = 0;
+    let max_cnt = 100;
+    for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+        channel_ids.insert(tag.channel_id);
+        cnt += 1;
+        if cnt >= max_cnt {
+            break;
+        }
+    }
+    return ParquetStat {
+        channels: channel_ids.into_iter().collect::<Vec<u16>>(),
+        schema: schema.clone(),
+    };
+}
+
+pub fn log_parquet_stat(file: &File) {
+    let stat = parquet_stat(file);
+    println!("parquet schema {:?}", stat.schema);
+    println!("channel_id found: {:?}", stat.channels);
+}
+
 pub fn parquet_to_time_tag_iter(file: File) -> impl Iterator<Item = NormalizedTimeTag> {
+    // parquet_stat(&file);
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let mut reader: ParquetRecordBatchReader = builder.build().unwrap();
     return reader.flat_map(|batch_result| {
