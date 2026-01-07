@@ -65,7 +65,7 @@ pub fn parquet_stat(file: &File) ->  ParquetStat {
 pub fn log_parquet_stat(file: &File) {
     let stat = parquet_stat(file);
     println!("parquet schema {:?}", stat.schema);
-    println!("channel_id found: {:?}", stat.channels);
+    println!("channel_id found in the first 100 tags: {:?}", stat.channels);
 }
 
 pub fn parquet_to_time_tag_iter(file: File) -> impl Iterator<Item = NormalizedTimeTag> {

@@ -160,14 +160,13 @@ where
 
 // filtered tracker to track the pulse phase and interval
 #[derive(Debug)]
-struct ClockTracker {
+struct PulseTracker {
     interval: f64, // picoseconds
     phase: f64,    // picoseconds
-    weight: f64,
     initialized: bool,
 }
 
-impl ClockTracker {
+impl PulseTracker {
     fn update(&mut self, t: f64){
         if !self.initialized {
             self.phase = t;
@@ -183,80 +182,97 @@ impl ClockTracker {
             self.phase = (self.phase * 0.1 + derived_phase * 0.9);
         }
     }
+    fn new() -> Self {
+        return Self {
+            interval: 1000.0, // picoseconds
+            phase: 0.0,       // picoseconds
+            initialized: false,
+        };
+    }
 }
 
-#[cfg(feature = "pulsed")]
-#[macroquad::main(window_conf)]
-async fn main () {
-    let args: Vec<String> = env::args().collect();
-    println!("reading: {:?}", args[1]);
-
-    let file = File::open(args[1].clone()).unwrap();
+fn display_parquet_stats(args: Vec<String>){
+    if args.len() < 3 {
+        std::process::exit(1);
+    }
+    let file = File::open(args[2].clone()).unwrap();
     log_parquet_stat(&file);
-    let stat = parquet_stat(&file);
-    let channel0_id = stat.channels[0];
-    let channel1_id = stat.channels[1];
-    println!("Using channel {} and {}", channel0_id, channel1_id);
 
-    let bucket_size: usize = 100_000;
+    use std::collections::{HashSet, HashMap};
 
-    let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
-    let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
-
-    let mut kernel_pdf_function = |x: f64| -> f64 {
-        use std::f64::consts::PI;
-        let sigma = 20.0;
-        let coefficient = 1.0 / (sigma * (2.0 * PI).sqrt());
-        let exponent = -(x*x) / (2.0 * sigma*sigma);
-        return coefficient * exponent.exp();
+    struct ChannelStat{
+        t_min: u64,// = f64::MAX
+        t_max: u64,
+        count: u64,
     };
 
-
-    let mut tracker = ClockTracker {
-        interval: 1000.0, // picoseconds
-        phase: 0.0,       // picoseconds
-        weight: 1.0,
-        initialized: false,
-    };
+    let mut channel_ids = HashSet::<u16>::new();
+    let mut channel_pulse_trackers = HashMap::<u16, PulseTracker>::new();
+    let mut channel_stats = HashMap::<u16, ChannelStat>::new();
     for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
-        if tag.channel_id == channel1_id {
-            continue;
+        if !channel_ids.contains(&tag.channel_id) {
+            channel_ids.insert(tag.channel_id);
+            channel_pulse_trackers.insert(tag.channel_id, PulseTracker::new());
+            channel_stats.insert(tag.channel_id, ChannelStat{
+                t_min: u64::MAX,
+                t_max: u64::MIN,
+                count: 0,
+            });
         }
-        // only use channel 0 for sampling
-        tracker.update(tag.time_tag_ps as f64);
-    }
-    println!("tracker result: {:?}", tracker);
 
-
-    // let mut cnt: i32 = 0;
-    for tag in parquet_to_time_tag_iter(file) {
-        let sample_interval = tracker.interval * 1.0;
-        let r = (tag.time_tag_ps as f64 - tracker.phase).rem_euclid(sample_interval)/sample_interval;
-        let mut index = (r * bucket_size as f64).floor() as usize;
-        if index == bucket_size {
-            index = bucket_size - 1;
+        channel_pulse_trackers.get_mut(&tag.channel_id).unwrap().update(tag.time_tag_ps as f64);
+        let stat = channel_stats.get_mut(&tag.channel_id).unwrap();
+        stat.count += 1;
+        if tag.time_tag_ps < stat.t_min {
+            stat.t_min = tag.time_tag_ps;
         }
-        if tag.channel_id == channel0_id {
-            bucket0[index] += 1.0;
-        } else if tag.channel_id == channel1_id {
-            bucket1[index] += 1.0;
+        if tag.time_tag_ps > stat.t_max {
+            stat.t_max = tag.time_tag_ps;
         }
     }
-    apply_pdf(&mut bucket0, kernel_pdf_function);
-    apply_pdf(&mut bucket1, kernel_pdf_function);
-
-    let result = fft_convolve(bucket0.clone(), bucket1.clone());
-
-    display_histogram(result).await;
+    let mut channels = channel_ids.into_iter().collect::<Vec<u16>>();
+    channels.sort();
+    use ansi_term::Colour::{Red, Yellow, Blue};
+    use ansi_term::Style;
+    println!("{}", Style::new().bold().paint(format!("\nAll channels scanned: {:?}", channels)));
+    for id in channels {
+        let pulse_tracker = channel_pulse_trackers.get(&id).unwrap();
+        let stat = channel_stats.get(&id).unwrap();
+        println!("{}, {} Counts, Start: {}, End: {}", 
+            Style::new().bold().paint(format!("Channel {}", id)), 
+            Yellow.paint(format!("{}", stat.count)), 
+            Yellow.paint(format!("{}ps", stat.t_min)), 
+            Yellow.paint(format!("{}ps", stat.t_max)));
+        println!("Derived pulse interval: {}", Yellow.paint(format!("{}ps", pulse_tracker.interval)));
+        println!("Derived pulse phase: {}", Yellow.paint(format!("{}ps", pulse_tracker.phase % pulse_tracker.interval)));
+    }
+    std::process::exit(1);
 }
 
-#[cfg(feature = "uniform")]
+
 #[macroquad::main(window_conf)]
 async fn main () {
     let args: Vec<String> = env::args().collect();
-    println!("reading: {:?}", args[1]);
 
-    let file = File::open(args[1].clone()).unwrap();
+    if args[1] == "--stats".to_string() {
+        println!("mode: stats");
+        display_parquet_stats(args.clone());
+    }
+
+    if args[1] == "--uniform".to_string() {
+        println!("mode: uniform");
+        handle_uniform(args.clone()).await;
+    }
+
+    if args[1] == "--pulsed".to_string() {
+        println!("mode: pulsed");
+        handle_pulsed(args.clone()).await;
+    }
+}
+
+async fn handle_uniform(args: Vec<String>) {
+    let file = File::open(args[2].clone()).unwrap();
+    println!("reading: {:?}", args[2]);
     log_parquet_stat(&file);
     let stat = parquet_stat(&file);
     let channel0_id = stat.channels[0];
@@ -290,5 +306,61 @@ async fn main () {
     let result = fft_convolve(bucket0.clone(), bucket1.clone());
 
     display_histogram(result).await;
+}
 
+
+async fn handle_pulsed(args: Vec<String>) {
+    let file = File::open(args[2].clone()).unwrap();
+    println!("reading: {:?}", args[2]);
+    log_parquet_stat(&file);
+    let stat = parquet_stat(&file);
+    let channel0_id = stat.channels[0];
+    let channel1_id = stat.channels[1];
+    println!("Using channel {} and {}", channel0_id, channel1_id);
+
+    let bucket_size: usize = 100_000;
+
+    let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
+    let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
+
+    let mut kernel_pdf_function = |x: f64| -> f64 {
+        use std::f64::consts::PI;
+        let sigma = 20.0;
+        let coefficient = 1.0 / (sigma * (2.0 * PI).sqrt());
+        let exponent = -(x*x) / (2.0 * sigma*sigma);
+        return coefficient * exponent.exp();
+    };
+
+
+    let mut tracker = PulseTracker::new();
+    for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+        if tag.channel_id == channel1_id {
+            continue;
+        }
+        // only use channel 0 for sampling
+        tracker.update(tag.time_tag_ps as f64);
+    }
+    println!("tracker result: {:?}", tracker);
+
+
+    // let mut cnt: i32 = 0;
+    for tag in parquet_to_time_tag_iter(file) {
+        let sample_interval = tracker.interval * 1.0;
+        let r = (tag.time_tag_ps as f64 - tracker.phase).rem_euclid(sample_interval)/sample_interval;
+        let mut index = (r * bucket_size as f64).floor() as usize;
+        if index == bucket_size {
+            index = bucket_size - 1;
+        }
+        if tag.channel_id == channel0_id {
+            bucket0[index] += 1.0;
+        } else if tag.channel_id == channel1_id {
+            bucket1[index] += 1.0;
+        }
+    }
+    apply_pdf(&mut bucket0, kernel_pdf_function);
+    apply_pdf(&mut bucket1, kernel_pdf_function);
+
+    let result = fft_convolve(bucket0.clone(), bucket1.clone());
+
+    display_histogram(result).await;
 }

@@ -9,7 +9,4 @@ arrow = "57.1.0"
 macroquad = "0.4"
 faer = "0.23.2"
 rustfft = "6.4.1"
-
-[features]
-pulsed = []
-uniform = []
+ansi_term = "0.12.1"
