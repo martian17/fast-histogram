@@ -1,7 +1,7 @@
 // Original definition:
 // https://github.com/moonshot-nagayama-pj/tdc_toolkit/blob/main/src/types.rs
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NormalizedTimeTag {
     pub channel_id: u16,
 

@@ -26,46 +26,44 @@ fn window_conf() -> Conf {
     }
 }
 
-struct MinMaxInfo {
-    max: f64,
-    min: f64,
+struct MinMaxInfo<T> {
+    max: T,
+    min: T,
     max_idx: usize,
     min_idx: usize,
 }
 
-fn max_min_and_index (values: &Vec<f64>) -> MinMaxInfo {
-    let mut min: f64 = f64::INFINITY;
-    let mut max: f64 = -f64::INFINITY;
-    let mut min_idx: usize = 0;
-    let mut max_idx: usize = 0;
-    for i in 0..values.len() {
-        if values[i] > max {
-            max = values[i];
+fn max_min_and_index<T>(values: &[T]) -> MinMaxInfo<T>
+where
+    T: PartialOrd + Copy,
+{
+    let mut min = values[0];
+    let mut max = values[0];
+    let mut min_idx = 0;
+    let mut max_idx = 0;
+
+    for (i, &value) in values.iter().enumerate().skip(1) {
+        if value > max {
+            max = value;
             max_idx = i;
         }
-        if values[i] < min {
-            min = values[i];
+        if value < min {
+            min = value;
             min_idx = i;
         }
     }
-    return MinMaxInfo {
-        max: max,
-        min: min,
-        max_idx: max_idx,
-        min_idx: min_idx,
+
+    MinMaxInfo {
+        max,
+        min,
+        max_idx,
+        min_idx,
     }
 }
 
-fn log_peak (values: &Vec<f64>) {
-    let min_max = max_min_and_index(&values);
-    let len: i32 = values.len() as i32;
-    let max_idx: i32 = min_max.max_idx as i32;
-    let peak_location = (max_idx + len/2 + len)%len - len/2;
-    println!("peak at {} ps", peak_location);
-}
 
 async fn display_histogram (values: Vec<f64>) {
-    log_peak(&values);
+    // log_peak(&values);
     let min_max = max_min_and_index(&values);
 
     let len = values.len();
@@ -196,7 +194,6 @@ fn display_parquet_stats(args: Vec<String>){
         std::process::exit(1);
     }
     let file = File::open(args[2].clone()).unwrap();
-    log_parquet_stat(&file);
 
     use std::collections::{HashSet, HashMap};
 
@@ -246,7 +243,6 @@ fn display_parquet_stats(args: Vec<String>){
         println!("Derived pulse interval: {}", Yellow.paint(format!("{}ps", pulse_tracker.interval)));
         println!("Derived pulse phase: {}", Yellow.paint(format!("{}ps", pulse_tracker.phase % pulse_tracker.interval)));
     }
-    std::process::exit(1);
 }
 
 
@@ -257,6 +253,12 @@ async fn main () {
     if args[1] == "--stats".to_string() {
         println!("mode: stats");
         display_parquet_stats(args.clone());
+        std::process::exit(1);
+    }
+
+    if args[1] == "--histogram".to_string() {
+        println!("mode: histogram");
+        handle_histogram(args.clone()).await;
     }
 
     if args[1] == "--uniform".to_string() {
@@ -279,21 +281,21 @@ async fn handle_uniform(args: Vec<String>) {
     let channel1_id = stat.channels[1];
     println!("Using channel {} and {}", channel0_id, channel1_id);
 
-    let bucket_size: usize = 100_000;
+    let bucket_size: usize = 123_456;//100_000;
 
     let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
     let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
 
     let mut kernel_pdf_function = |x: f64| -> f64 {
         use std::f64::consts::PI;
-        let sigma = 200.0;
+        let sigma = 2000.0;
         let coefficient = 1.0 / (sigma * (2.0 * PI).sqrt());
         let exponent = -(x*x) / (2.0 * sigma*sigma);
         return coefficient * exponent.exp();
     };
 
     for tag in parquet_to_time_tag_iter(file) {
-        let index = tag.time_tag_ps as usize % bucket_size;
+        let index = (tag.time_tag_ps as usize).rem_euclid(bucket_size);
         if tag.channel_id == channel0_id {
             bucket0[index] += 1.0;
         } else if tag.channel_id == channel1_id {
@@ -318,7 +320,7 @@ async fn handle_pulsed(args: Vec<String>) {
     let channel1_id = stat.channels[1];
     println!("Using channel {} and {}", channel0_id, channel1_id);
 
-    let bucket_size: usize = 100_000;
+    let bucket_size: usize = 1000;
 
     let mut bucket0: Vec<f64> = vec![0.0; bucket_size];
     let mut bucket1: Vec<f64> = vec![0.0; bucket_size];
@@ -332,21 +334,23 @@ async fn handle_pulsed(args: Vec<String>) {
     };
 
 
-    let mut tracker = PulseTracker::new();
+    let mut tracker0 = PulseTracker::new();
+    let mut tracker1 = PulseTracker::new();
     for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
-        if tag.channel_id == channel1_id {
-            continue;
+        if tag.channel_id == channel0_id {
+            tracker0.update(tag.time_tag_ps as f64);
+        } else if tag.channel_id == channel1_id {
+            tracker1.update(tag.time_tag_ps as f64);
         }
-        // only use channel 0 for sampling
-        tracker.update(tag.time_tag_ps as f64);
     }
-    println!("tracker result: {:?}", tracker);
+    println!("tracker result: {:?}", tracker0);
 
+    let sample_interval = (tracker0.interval + tracker1.interval)/2.0;
+    let sample_offset = tracker0.phase;
 
-    // let mut cnt: i32 = 0;
     for tag in parquet_to_time_tag_iter(file) {
-        let sample_interval = tracker.interval * 1.0;
-        let r = (tag.time_tag_ps as f64 - tracker.phase).rem_euclid(sample_interval)/sample_interval;
+        let sample_interval = tracker0.interval * 1.0;
+        let r = (tag.time_tag_ps as f64 - tracker0.phase).rem_euclid(sample_interval)/sample_interval;
         let mut index = (r * bucket_size as f64).floor() as usize;
         if index == bucket_size {
             index = bucket_size - 1;
@@ -355,12 +359,130 @@ async fn handle_pulsed(args: Vec<String>) {
             bucket0[index] += 1.0;
         } else if tag.channel_id == channel1_id {
             bucket1[index] += 1.0;
+        } else {
+            panic!("what???");
         }
     }
-    apply_pdf(&mut bucket0, kernel_pdf_function);
-    apply_pdf(&mut bucket1, kernel_pdf_function);
+    // apply_pdf(&mut bucket0, kernel_pdf_function);
+    // apply_pdf(&mut bucket1, kernel_pdf_function);
 
     let result = fft_convolve(bucket0.clone(), bucket1.clone());
 
     display_histogram(result).await;
 }
+
+
+fn log_peak (values: &Vec<i32>, bin_size: usize) {
+    use ansi_term::Colour::{Red, Yellow, Blue};
+    let min_max = max_min_and_index(&values);
+    let len: i32 = values.len() as i32;
+    let max_idx: i32 = min_max.max_idx as i32;
+    let peak_idx = (max_idx + len/2).rem_euclid(len) - len/2;
+    //+ len)%len - len/2;
+    println!("{}", Yellow.bold().paint(format!("Peak found at {}ps", peak_idx * bin_size as i32)));
+}
+
+
+async fn handle_histogram(args: Vec<String>) {
+    let file = File::open(args[2].clone()).unwrap();
+    println!("reading: {:?}", args[2]);
+    log_parquet_stat(&file);
+    let stat = parquet_stat(&file);
+    let channel1_id = stat.channels[1];
+    let channel2_id = stat.channels[0];
+    println!("Using channel {} and {}", channel1_id, channel2_id);
+
+    let bucket_size: usize = 200_0;// 5 x 200n = 1 micro seconds of range
+    let bin_size: usize = 5;// 5 picoseconds
+    let mut bucket: Vec<i32> = vec![0; bucket_size];
+    
+    let mut syn_start: u64 = 0;
+    
+    let mut stored_tags: Vec<NormalizedTimeTag> = Vec::new();
+    for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+        stored_tags.push(tag.clone());
+        if tag.channel_id == channel1_id {
+            syn_start = tag.time_tag_ps;
+        } else if tag.channel_id == channel2_id {
+            if syn_start == 0 {
+                continue;
+            }
+            let diff = (tag.time_tag_ps as i64 - syn_start as i64)/(bin_size as i64);
+            if diff < (bucket_size/2) as i64 {
+                bucket[diff as usize] += 1;
+            }
+            // channel2.push(tag.time_tag_ps);
+        }
+    }
+    syn_start = u64::MAX;
+    for tag in stored_tags.iter().rev() {
+        if tag.channel_id == channel1_id {
+            syn_start = tag.time_tag_ps;
+        } else if tag.channel_id == channel2_id {
+            if syn_start == u64::MAX {
+                continue;
+            }
+            let mut diff = (syn_start as i64 - tag.time_tag_ps as i64)/(bin_size as i64);// tag is always smaller here
+            if diff < (bucket_size/2) as i64 {
+                bucket[((bucket_size - 1) as i64 - diff) as usize] += 1;
+            }
+            // channel2.push(tag.time_tag_ps);
+        }
+    }
+    display_parquet_stats(args.clone());
+    log_peak(&bucket, bin_size);
+    
+    display_histogram(bucket.iter().map(|v| *v as f64).collect()).await;
+}
+
+
+// async fn handle_coincidence(args: Vec<String>) {
+//     let file = File::open(args[2].clone()).unwrap();
+//     println!("reading: {:?}", args[2]);
+//     log_parquet_stat(&file);
+//     let stat = parquet_stat(&file);
+//     let channel1_id = stat.channels[0];
+//     let channel2_id = stat.channels[1];
+//     println!("Using channel {} and {}", channel1_id, channel2_id);
+// 
+//     let bucket_size: usize = 200_0;// 5 x 200n = 1 micro seconds of range
+//     let bin_size: usize = 5;// 5 picoseconds
+//     let mut bucket: Vec<i32> = vec![0; bucket_size];
+//     
+//     let mut syn_start: u64 = 0;
+//     
+//     let mut stored_tags: Vec<NormalizedTimeTag> = Vec::new();
+//     for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+//         stored_tags.push(tag.clone());
+//         if tag.channel_id == channel1_id {
+//             syn_start = tag.time_tag_ps;
+//         } else if tag.channel_id == channel2_id {
+//             if syn_start == 0 {
+//                 continue;
+//             }
+//             let diff = (tag.time_tag_ps as i64 - syn_start as i64)/(bin_size as i64);
+//             if diff < (bucket_size/2) as i64 {
+//                 bucket[diff as usize] += 1;
+//             }
+//             // channel2.push(tag.time_tag_ps);
+//         }
+//     }
+//     syn_start = u64::MAX;
+//     for tag in stored_tags.iter().rev() {
+//         if tag.channel_id == channel1_id {
+//             syn_start = tag.time_tag_ps;
+//         } else if tag.channel_id == channel2_id {
+//             if syn_start == u64::MAX {
+//                 continue;
+//             }
+//             let mut diff = (syn_start as i64 - tag.time_tag_ps as i64)/(bin_size as i64);// tag is always smaller here
+//             if diff < (bucket_size/2) as i64 {
+//                 bucket[((bucket_size - 1) as i64 - diff) as usize] += 1;
+//             }
+//             // channel2.push(tag.time_tag_ps);
+//         }
+//     }
+//     log_peak(&bucket, bin_size);
+//     
+//     display_histogram(bucket.iter().map(|v| *v as f64).collect()).await;
+// }
