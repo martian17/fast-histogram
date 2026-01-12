@@ -6,7 +6,13 @@ edition = "2024"
 [dependencies]
 parquet = { version = "57.1.0", features = ["arrow"] }
 arrow = "57.1.0"
-macroquad = "0.4"
-faer = "0.23.2"
+# faer = "0.23.2"
 rustfft = "6.4.1"
 ansi_term = "0.12.1"
+owo-colors = "4.2.3"
+plotly = "0.14"
+
+# For opening the file at the end
+tiny_http = "0.12.0"
+open = "5.3.3"
+anyhow = "1.0.100"

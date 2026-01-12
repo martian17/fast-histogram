@@ -3,12 +3,8 @@ use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReader
 };
 use arrow::array::{UInt16Array, UInt64Array};
-use arrow::array::RecordBatchReader;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
+use arrow::datatypes::{SchemaRef};
 use std::fs::File;
-use std::path::Path;
-use std::env;
 
 use crate::types::NormalizedTimeTag;
 
@@ -41,13 +37,13 @@ pub struct ParquetStat {
 
 pub fn parquet_stat(file: &File) ->  ParquetStat {
     use std::collections::HashSet;
-    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap()).unwrap();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap()).unwrap();
     let schema = builder.schema();
 
     let mut channel_ids = HashSet::<u16>::new();
     let mut cnt = 0;
     let max_cnt = 100;
-    for tag in parquet_to_time_tag_iter(file.try_clone().unwrap()) {
+    for tag in parquet_to_time_tag_iter(file) {
         channel_ids.insert(tag.channel_id);
         cnt += 1;
         if cnt >= max_cnt {
@@ -68,9 +64,9 @@ pub fn log_parquet_stat(file: &File) {
     println!("channel_id found in the first 100 tags: {:?}", stat.channels);
 }
 
-pub fn parquet_to_time_tag_iter(file: File) -> impl Iterator<Item = NormalizedTimeTag> {
-    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-    let mut reader: ParquetRecordBatchReader = builder.build().unwrap();
+pub fn parquet_to_time_tag_iter(file: &File) -> impl Iterator<Item = NormalizedTimeTag> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap()).unwrap();
+    let reader: ParquetRecordBatchReader = builder.build().unwrap();
     return reader.flat_map(|batch_result| {
         let batch = batch_result.expect("Expected batch");
         let col_channel_ref = batch.column_by_name("channel").expect("Expected channel ArrayRef");
